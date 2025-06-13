@@ -24,6 +24,7 @@ print(f"length of dataset in characters: {len(data):,}")
 chars = sorted(list(set(data)))
 vocab_size = len(chars)
 print("all the unique characters:", ''.join(chars))
+
 print(f"vocab size: {vocab_size:,}")
 
 # create a mapping from characters to integers

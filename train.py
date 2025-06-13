@@ -69,9 +69,13 @@ min_lr = 6e-5 # minimum learning rate, should be ~= learning_rate/10 per Chinchi
 # DDP settings
 backend = 'nccl' # 'nccl', 'gloo', etc.
 # system
-device = 'cuda' # examples: 'cpu', 'cuda', 'cuda:0', 'cuda:1' etc., or try 'mps' on macbooks
-dtype = 'bfloat16' if torch.cuda.is_available() and torch.cuda.is_bf16_supported() else 'float16' # 'float32', 'bfloat16', or 'float16', the latter will auto implement a GradScaler
-compile = True # use PyTorch 2.0 to compile the model to be faster
+device = 'mps' # examples: 'cpu', 'cuda', 'cuda:0', 'cuda:1' etc., or try 'mps' on macbooks
+# 设置数据类型，优先使用MPS支持的类型
+print(torch.__version__)  # 应输出2.0.0或更高版本
+
+
+# 其他配置保持不变...
+compile = False # use PyTorch 2.0 to compile the model to be faster
 # -----------------------------------------------------------------------------
 config_keys = [k for k,v in globals().items() if not k.startswith('_') and isinstance(v, (int, float, bool, str))]
 exec(open('configurator.py').read()) # overrides from command line or config file
@@ -106,11 +110,24 @@ if master_process:
 torch.manual_seed(1337 + seed_offset)
 torch.backends.cuda.matmul.allow_tf32 = True # allow tf32 on matmul
 torch.backends.cudnn.allow_tf32 = True # allow tf32 on cudnn
-device_type = 'cuda' if 'cuda' in device else 'cpu' # for later use in torch.autocast
-# note: float16 data type will automatically use a GradScaler
-ptdtype = {'float32': torch.float32, 'bfloat16': torch.bfloat16, 'float16': torch.float16}[dtype]
-ctx = nullcontext() if device_type == 'cpu' else torch.amp.autocast(device_type=device_type, dtype=ptdtype)
-
+device_type = 'mps'
+# 优化设置，根据设备类型调整
+if torch.backends.mps.is_available():
+    device = 'mps'
+    dtype = 'float32'  # M1/M2上float32更稳定
+    use_autocast = False  # 禁用自动混合精度
+elif torch.cuda.is_available():
+    device = 'cuda'
+    dtype = 'bfloat16' if torch.cuda.is_bf16_supported() else 'float16'
+    use_autocast = True  # 启用自动混合精度
+else:
+    device = 'cpu'
+    dtype = 'float32'
+    use_autocast = False  # CPU上禁用自动混合精度
+device = 'cpu'
+dtype = 'float32'
+# 上下文管理器
+ctx = nullcontext() #if not use_autocast else torch.amp.autocast( device_type=device, dtype={'float32': torch.float32, 'bfloat16': torch.bfloat16, 'float16': torch.float16}[dtype])
 # poor man's data loader
 data_dir = os.path.join('data', dataset)
 def get_batch(split):
