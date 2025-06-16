@@ -5,6 +5,7 @@ Will save train.bin, val.bin containing the ids, and meta.pkl containing the
 encoder and decoder and some other related info.
 """
 import os
+import pdb
 import pickle
 import requests
 import numpy as np
@@ -16,7 +17,7 @@ if not os.path.exists(input_file_path):
     with open(input_file_path, 'w') as f:
         f.write(requests.get(data_url).text)
 
-with open(input_file_path, 'r') as f:
+with open(input_file_path, 'r',encoding='utf-16') as f:
     data = f.read()
 print(f"length of dataset in characters: {len(data):,}")
 
