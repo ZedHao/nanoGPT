@@ -32,40 +32,40 @@ from model import GPTConfig, GPT
 # -----------------------------------------------------------------------------
 # default config values designed to train a gpt2 (124M) on OpenWebText
 # I/O
-out_dir = 'out'
-eval_interval = 2000
-log_interval = 1
-eval_iters = 200
-eval_only = False # if True, script exits right after the first eval
-always_save_checkpoint = True # if True, always save a checkpoint after each eval
-init_from = 'scratch' # 'scratch' or 'resume' or 'gpt2*'
+out_dir = 'out'  # 模型训练输出目录，用于保存检查点、日志等文件
+eval_interval = 2000  # 每训练2000步进行一次验证，监控模型在验证集上的性能
+log_interval = 1  # 每1步打印一次训练日志，实时输出训练进度和损失值
+eval_iters = 200  # 验证时运行的迭代次数，用于计算平均损失以评估模型泛化能力
+eval_only = False  # 若设为True，脚本在首次验证后直接退出，用于测试或推理模式
+always_save_checkpoint = True  # 每次验证后强制保存模型检查点，确保训练进度不丢失
+init_from = 'scratch'  # 模型初始化方式：'scratch'（从头训练）、'resume'（恢复训练）或'gpt2*'（加载预训练模型）
 # wandb logging
 wandb_log = False # disabled by default
 wandb_project = 'owt'
 wandb_run_name = 'gpt2' # 'run' + str(time.time())
 # data
-dataset = 'openwebtext'
-gradient_accumulation_steps = 5 * 8 # used to simulate larger batch sizes
-batch_size = 12 # if gradient_accumulation_steps > 1, this is the micro-batch size
-block_size = 1024
+dataset = 'openwebtext'  # 使用OpenWebText数据集，包含约800万网页文本
+gradient_accumulation_steps = 5 * 8  # 梯度累积步数，通过累积多个小批量梯度模拟更大批量训练（等效batch_size *= 此值）
+batch_size = 12  # 微批量大小，当gradient_accumulation_steps>1时，实际批量为batch_size * 累积步数
+block_size = 1024  # 模型输入的最大上下文长度（token数），决定模型能处理的文本依赖范围
 # model
-n_layer = 12
-n_head = 12
-n_embd = 768
-dropout = 0.0 # for pretraining 0 is good, for finetuning try 0.1+
-bias = False # do we use bias inside LayerNorm and Linear layers?
+n_layer = 12  # Transformer网络层数，决定模型深度（GPT-2 124M对应12层）
+n_head = 12  # 注意力机制的头数，每层将特征分为12个并行子空间处理
+n_embd = 768  # 词嵌入维度，每个token的向量表示维度（与n_head关联：768=12*64）
+dropout = 0.0  #  dropout率，预训练时通常设为0，微调时可增加至0.1+以防止过拟合
+bias = False  # 是否在LayerNorm和Linear层中使用偏置项，False为GPT-2原始设计
 # adamw optimizer
-learning_rate = 6e-4 # max learning rate
-max_iters = 600000 # total number of training iterations
-weight_decay = 1e-1
-beta1 = 0.9
-beta2 = 0.95
-grad_clip = 1.0 # clip gradients at this value, or disable if == 0.0
+learning_rate = 6e-4  # 最大学习率，基于Chinchilla缩放法则设定的初始值
+max_iters = 600000  # 总训练迭代次数，对应约400亿token的训练规模
+weight_decay = 1e-1  # 权重衰减系数，用于正则化防止过拟合
+beta1 = 0.9  # AdamW优化器的一阶矩估计衰减率
+beta2 = 0.95  # AdamW优化器的二阶矩估计衰减率
+grad_clip = 1.0  # 梯度裁剪阈值，防止梯度爆炸，0.0表示禁用裁剪
 # learning rate decay settings
-decay_lr = True # whether to decay the learning rate
-warmup_iters = 2000 # how many steps to warm up for
-lr_decay_iters = 600000 # should be ~= max_iters per Chinchilla
-min_lr = 6e-5 # minimum learning rate, should be ~= learning_rate/10 per Chinchilla
+decay_lr = True  # 是否启用学习率衰减，True时采用余弦退火策略
+warmup_iters = 2000  # 学习率预热步数，训练初期逐步提升至最大学习率
+lr_decay_iters = 600000  # 学习率衰减总步数，通常与max_iters一致
+min_lr = 6e-5  # 最小学习率，为最大学习率的1/10（遵循Chinchilla原则）
 # DDP settings
 backend = 'nccl' # 'nccl', 'gloo', etc.
 # system
@@ -82,32 +82,43 @@ exec(open('configurator.py').read()) # overrides from command line or config fil
 config = {k: globals()[k] for k in config_keys} # will be useful for logging
 # -----------------------------------------------------------------------------
 
-# various inits, derived attributes, I/O setup
-ddp = int(os.environ.get('RANK', -1)) != -1 # is this a ddp run?
-if ddp:
-    init_process_group(backend=backend)
-    ddp_rank = int(os.environ['RANK'])
-    ddp_local_rank = int(os.environ['LOCAL_RANK'])
-    ddp_world_size = int(os.environ['WORLD_SIZE'])
-    device = f'cuda:{ddp_local_rank}'
-    torch.cuda.set_device(device)
-    master_process = ddp_rank == 0 # this process will do logging, checkpointing etc.
-    seed_offset = ddp_rank # each process gets a different seed
-    # world_size number of processes will be training simultaneously, so we can scale
-    # down the desired gradient accumulation iterations per process proportionally
-    assert gradient_accumulation_steps % ddp_world_size == 0
-    gradient_accumulation_steps //= ddp_world_size
-else:
-    # if not ddp, we are running on a single gpu, and one process
-    master_process = True
-    seed_offset = 0
-    ddp_world_size = 1
-tokens_per_iter = gradient_accumulation_steps * ddp_world_size * batch_size * block_size
-print(f"tokens per iteration will be: {tokens_per_iter:,}")
-
+# 这段代码是 PyTorch 中实现 ** 分布式数据并行训练（Distributed Data Parallel, DDP）** 的初始化逻辑，主要功能是配置多 GPU / 多节点训练环境
+# 这段代码通过环境变量检测是否启动分布式训练，并自动配置：
+#
+# 进程间通信与 GPU 分配
+# 主进程任务调度
+# 梯度累积参数调整
+# 训练吞吐量计算
+def ddpInit(gradient_accumulation_steps):
+    ddp = int(os.environ.get('RANK', -1)) != -1 # is this a ddp run?
+    if ddp:
+        init_process_group(backend=backend)
+        ddp_rank = int(os.environ['RANK'])
+        ddp_local_rank = int(os.environ['LOCAL_RANK'])
+        ddp_world_size = int(os.environ['WORLD_SIZE'])
+        device = f'cuda:{ddp_local_rank}'
+        torch.cuda.set_device(device)
+        master_process = ddp_rank == 0 # this process will do logging, checkpointing etc.
+        seed_offset = ddp_rank # each process gets a different seed
+        # world_size number of processes will be training simultaneously, so we can scale
+        # down the desired gradient accumulation iterations per process proportionally
+        assert gradient_accumulation_steps % ddp_world_size == 0
+        gradient_accumulation_steps //= ddp_world_size
+    else:
+        # if not ddp, we are running on a single gpu, and one process
+        master_process = True
+        seed_offset = 0
+        ddp_world_size = 1
+    tokens_per_iter = gradient_accumulation_steps * ddp_world_size * batch_size * block_size
+    print(f"tokens per iteration will be: {tokens_per_iter:,}")
+    return
+# 这段代码是深度学习训练脚本的设备配置与环境初始化部分，
+# 主要负责：创建输出目录、设置随机种子、检测计算设备、配置数据类型和精度模式，
+# 以及准备数据加载路径。以下是详细解析：
 if master_process:
     os.makedirs(out_dir, exist_ok=True)
-torch.manual_seed(1337 + seed_offset)
+torch.manual_seed(1337 + seed_offset) # 功能：设置 PyTorch 的随机种子，保证模型初始化、数据洗牌等操作的可复现性。
+
 torch.backends.cuda.matmul.allow_tf32 = True # allow tf32 on matmul
 torch.backends.cudnn.allow_tf32 = True # allow tf32 on cudnn
 device_type = 'mps'
