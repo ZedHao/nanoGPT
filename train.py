@@ -89,7 +89,14 @@ config = {k: globals()[k] for k in config_keys} # will be useful for logging
 # 主进程任务调度
 # 梯度累积参数调整
 # 训练吞吐量计算
-def ddpInit(gradient_accumulation_steps):
+# ddp是一个布尔标志，决定是否启用分布式训练模式
+# 当ddp=True时，代码会初始化分布式环境并配置多 GPU 训练参数
+# 当ddp=False时，默认使用单 GPU 训练
+master_process = False
+seed_offset = 0
+ddp = False
+ddp_local_rank = 0
+def ddp_set_muti(gradient_accumulation_steps: int) -> (bool, int):
     ddp = int(os.environ.get('RANK', -1)) != -1 # is this a ddp run?
     if ddp:
         init_process_group(backend=backend)
@@ -115,33 +122,45 @@ def ddpInit(gradient_accumulation_steps):
 # 这段代码是深度学习训练脚本的设备配置与环境初始化部分，
 # 主要负责：创建输出目录、设置随机种子、检测计算设备、配置数据类型和精度模式，
 # 以及准备数据加载路径。以下是详细解析：
-if master_process:
-    os.makedirs(out_dir, exist_ok=True)
-torch.manual_seed(1337 + seed_offset) # 功能：设置 PyTorch 的随机种子，保证模型初始化、数据洗牌等操作的可复现性。
+def torch_init()-> (str, str,str):
+    if master_process:
+        os.makedirs(out_dir, exist_ok=True)
+    torch.manual_seed(1337 + seed_offset) # 功能：设置 PyTorch 的随机种子，保证模型初始化、数据洗牌等操作的可复现性。
 
-torch.backends.cuda.matmul.allow_tf32 = True # allow tf32 on matmul
-torch.backends.cudnn.allow_tf32 = True # allow tf32 on cudnn
-device_type = 'mps'
-# 优化设置，根据设备类型调整
-if torch.backends.mps.is_available():
-    device = 'mps'
-    dtype = 'float32'  # M1/M2上float32更稳定
-    use_autocast = False  # 禁用自动混合精度
-elif torch.cuda.is_available():
-    device = 'cuda'
-    dtype = 'bfloat16' if torch.cuda.is_bf16_supported() else 'float16'
-    use_autocast = True  # 启用自动混合精度
-else:
+    torch.backends.cuda.matmul.allow_tf32 = True # allow tf32 on matmul
+    torch.backends.cudnn.allow_tf32 = True # allow tf32 on cudnn
+    device_type = 'mps'
+    # 优化设置，根据设备类型调整
+    if torch.backends.mps.is_available():
+        device = 'mps'
+        dtype = 'float32'  # M1/M2上float32更稳定
+        use_autocast = False  # 禁用自动混合精度
+    elif torch.cuda.is_available():
+        device = 'cuda'
+        dtype = 'bfloat16' if torch.cuda.is_bf16_supported() else 'float16'
+        use_autocast = True  # 启用自动混合精度
+    else:
+        device = 'cpu'
+        dtype = 'float32'
+        use_autocast = False  # CPU上禁用自动混合精度
     device = 'cpu'
     dtype = 'float32'
-    use_autocast = False  # CPU上禁用自动混合精度
-device = 'cpu'
-dtype = 'float32'
+    device_type = 'mps'
+    return device, dtype,device_type
 # 上下文管理器
 ctx = nullcontext() #if not use_autocast else torch.amp.autocast( device_type=device, dtype={'float32': torch.float32, 'bfloat16': torch.bfloat16, 'float16': torch.float16}[dtype])
 # poor man's data loader
 data_dir = os.path.join('data', dataset)
-def get_batch(split):
+def get_batch(split, device_type):
+    '''
+    代码功能解析：高效数据加载与批量生成
+    这段代码是深度学习模型（尤其是语言模型）的数据加载核心逻辑，主要实现了基于内存映射的高效数据读取和批量数据生成。以下是详细解析：
+        内存映射：np.memmap将二进制文件直接映射到内存，无需一次性加载全部数据到 RAM，适合处理 GB 级大规模数据集（如语言模型训练数据）。
+        避免内存泄漏：每次迭代重新创建memmap对象，解决了长期持有内存映射可能导致的资源释放问题（参考注释中的 Stack Overflow 解决方案）。
+    :param split:
+    :param device_type:
+    :return:
+    '''
     # We recreate np.memmap every batch to avoid a memory leak, as per
     # https://stackoverflow.com/questions/45132940/numpy-memmap-memory-usage-want-to-iterate-once/61472122#61472122
     if split == 'train':
@@ -149,6 +168,14 @@ def get_batch(split):
     else:
         data = np.memmap(os.path.join(data_dir, 'val.bin'), dtype=np.uint16, mode='r')
     ix = torch.randint(len(data) - block_size, (batch_size,))
+    '''
+    . 随机索引生成
+        ix = torch.randint(...)：生成batch_size个随机索引，范围是[0, len(data)-block_size]。
+        目的：从长序列中随机采样block_size长度的片段，用于训练语言模型的上下文预测任务。
+        2. 输入 - 目标序列构建
+        输入序列 x：从索引 i 开始的block_size个 token。
+        目标序列 y：从索引 i+1 开始的block_size个 token（即 x 的下一个 token 序列）。
+    '''
     x = torch.stack([torch.from_numpy((data[i:i+block_size]).astype(np.int64)) for i in ix])
     y = torch.stack([torch.from_numpy((data[i+1:i+1+block_size]).astype(np.int64)) for i in ix])
     if device_type == 'cuda':
@@ -174,52 +201,55 @@ if os.path.exists(meta_path):
 # model init
 model_args = dict(n_layer=n_layer, n_head=n_head, n_embd=n_embd, block_size=block_size,
                   bias=bias, vocab_size=None, dropout=dropout) # start with model_args from command line
-if init_from == 'scratch':
-    # init a new model from scratch
-    print("Initializing a new model from scratch")
-    # determine the vocab size we'll use for from-scratch training
-    if meta_vocab_size is None:
-        print("defaulting to vocab_size of GPT-2 to 50304 (50257 rounded up for efficiency)")
-    model_args['vocab_size'] = meta_vocab_size if meta_vocab_size is not None else 50304
-    gptconf = GPTConfig(**model_args)
-    model = GPT(gptconf)
-elif init_from == 'resume':
-    print(f"Resuming training from {out_dir}")
-    # resume training from a checkpoint.
-    ckpt_path = os.path.join(out_dir, 'ckpt.pt')
-    checkpoint = torch.load(ckpt_path, map_location=device)
-    checkpoint_model_args = checkpoint['model_args']
-    # force these config attributes to be equal otherwise we can't even resume training
-    # the rest of the attributes (e.g. dropout) can stay as desired from command line
-    for k in ['n_layer', 'n_head', 'n_embd', 'block_size', 'bias', 'vocab_size']:
-        model_args[k] = checkpoint_model_args[k]
-    # create the model
-    gptconf = GPTConfig(**model_args)
-    model = GPT(gptconf)
-    state_dict = checkpoint['model']
-    # fix the keys of the state dictionary :(
-    # honestly no idea how checkpoints sometimes get this prefix, have to debug more
-    unwanted_prefix = '_orig_mod.'
-    for k,v in list(state_dict.items()):
-        if k.startswith(unwanted_prefix):
-            state_dict[k[len(unwanted_prefix):]] = state_dict.pop(k)
-    model.load_state_dict(state_dict)
-    iter_num = checkpoint['iter_num']
-    best_val_loss = checkpoint['best_val_loss']
-elif init_from.startswith('gpt2'):
-    print(f"Initializing from OpenAI GPT-2 weights: {init_from}")
-    # initialize from OpenAI GPT-2 weights
-    override_args = dict(dropout=dropout)
-    model = GPT.from_pretrained(init_from, override_args)
-    # read off the created config params, so we can store them into checkpoint correctly
-    for k in ['n_layer', 'n_head', 'n_embd', 'block_size', 'bias', 'vocab_size']:
-        model_args[k] = getattr(model.config, k)
+def get_model_init_from(init_from):
+    if init_from == 'scratch':
+        # init a new model from scratch
+        print("Initializing a new model from scratch")
+        # determine the vocab size we'll use for from-scratch training
+        if meta_vocab_size is None:
+            print("defaulting to vocab_size of GPT-2 to 50304 (50257 rounded up for efficiency)")
+        model_args['vocab_size'] = meta_vocab_size if meta_vocab_size is not None else 50304
+        gptconf = GPTConfig(**model_args)
+        model = GPT(gptconf)
+    elif init_from == 'resume':
+        print(f"Resuming training from {out_dir}")
+        # resume training from a checkpoint.
+        ckpt_path = os.path.join(out_dir, 'ckpt.pt')
+        checkpoint = torch.load(ckpt_path, map_location=device)
+        checkpoint_model_args = checkpoint['model_args']
+        # force these config attributes to be equal otherwise we can't even resume training
+        # the rest of the attributes (e.g. dropout) can stay as desired from command line
+        for k in ['n_layer', 'n_head', 'n_embd', 'block_size', 'bias', 'vocab_size']:
+            model_args[k] = checkpoint_model_args[k]
+        # create the model
+        gptconf = GPTConfig(**model_args)
+        model = GPT(gptconf)
+        state_dict = checkpoint['model']
+        # fix the keys of the state dictionary :(
+        # honestly no idea how checkpoints sometimes get this prefix, have to debug more
+        unwanted_prefix = '_orig_mod.'
+        for k,v in list(state_dict.items()):
+            if k.startswith(unwanted_prefix):
+                state_dict[k[len(unwanted_prefix):]] = state_dict.pop(k)
+        model.load_state_dict(state_dict)
+        iter_num = checkpoint['iter_num']
+        best_val_loss = checkpoint['best_val_loss']
+    elif init_from.startswith('gpt2'):
+        print(f"Initializing from OpenAI GPT-2 weights: {init_from}")
+        # initialize from OpenAI GPT-2 weights
+        override_args = dict(dropout=dropout)
+        model = GPT.from_pretrained(init_from, override_args)
+        # read off the created config params, so we can store them into checkpoint correctly
+        for k in ['n_layer', 'n_head', 'n_embd', 'block_size', 'bias', 'vocab_size']:
+            model_args[k] = getattr(model.config, k)
 # crop down the model block size if desired, using model surgery
-if block_size < model.config.block_size:
-    model.crop_block_size(block_size)
-    model_args['block_size'] = block_size # so that the checkpoint will have the right value
-model.to(device)
+    if block_size < model.config.block_size:
+        model.crop_block_size(block_size)
+        model_args['block_size'] = block_size # so that the checkpoint will have the right value
+    model.to(device)
+    return model
 
+model = get_model_init_from(init_from)
 # initialize a GradScaler. If enabled=False scaler is a no-op
 scaler = torch.cuda.amp.GradScaler(enabled=(dtype == 'float16'))
 
@@ -280,8 +310,8 @@ t0 = time.time()
 local_iter_num = 0 # number of iterations in the lifetime of this process
 raw_model = model.module if ddp else model # unwrap DDP container if needed
 running_mfu = -1.0
-while True:
 
+def foreach_learn_stop(iter_num,running_mfu,best_val_loss,local_iter_num,t0) ->bool:
     # determine and set the learning rate for this iteration
     lr = get_lr(iter_num) if decay_lr else learning_rate
     for param_group in optimizer.param_groups:
@@ -313,7 +343,7 @@ while True:
                 print(f"saving checkpoint to {out_dir}")
                 torch.save(checkpoint, os.path.join(out_dir, 'ckpt.pt'))
     if iter_num == 0 and eval_only:
-        break
+        return True
 
     # forward backward update, with optional gradient accumulation to simulate larger batch size
     # and using the GradScaler if data type is float16
@@ -358,7 +388,12 @@ while True:
 
     # termination conditions
     if iter_num > max_iters:
+        return True
+
+while True:
+    res = foreach_learn_stop(iter_num,running_mfu,best_val_loss,local_iter_num,t0)
+    if res:
         break
 
-if ddp:
+if __name__ == '__main__':
     destroy_process_group()
