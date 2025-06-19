@@ -13,22 +13,21 @@ from model import GPTConfig, GPT
 init_from = 'resume' # either 'resume' (from an out_dir) or a gpt2 variant (e.g. 'gpt2-xl')
 out_dir = 'out' # ignored if init_from is not 'resume'
 start = "\n" # or "<|endoftext|>" or etc. Can also specify a file, use as: "FILE:prompt.txt"
-num_samples = 1 # number of samples to draw
-max_new_tokens = 1000 # number of tokens generated in each sample
+num_samples = 10 # number of samples to draw
+max_new_tokens = 500 # number of tokens generated in each sample
 temperature = 0.8 # 1.0 = no change, < 1.0 = less random, > 1.0 = more random, in predictions
 top_k =100 # retain only the top_k most likely tokens, clamp others to have 0 probability
 seed = 1337
-device_type = 'mps'
 
 # 检测MPS是否可用并设置设备
 import pdb
-
-
 if torch.backends.mps.is_available():
     device = 'mps'
 else:
     device = 'cpu'  # 纯CPU模式，性能较差
 device = 'cpu'
+device_type = 'mps' # examples: 'cpu', 'cuda', 'cuda:0', 'cuda:1', etc.
+
 # 设置数据类型，优先使用MPS支持的类型
 if device == 'mps':
     # M1/M2对bfloat16支持较好，float16可能有兼容性问题

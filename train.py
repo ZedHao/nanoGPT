@@ -70,12 +70,13 @@ min_lr = 6e-5  # 最小学习率，为最大学习率的1/10（遵循Chinchilla�
 backend = 'nccl' # 'nccl', 'gloo', etc.
 # system
 device = 'mps' # examples: 'cpu', 'cuda', 'cuda:0', 'cuda:1' etc., or try 'mps' on macbooks
+dtype = 'bfloat16' if torch.cuda.is_available() and torch.cuda.is_bf16_supported() else 'float16' # 'float32', 'bfloat16', or 'float16', the latter will auto implement a GradScaler
+compile = False # use PyTorch 2.0 to compile the model to be faster
 # 设置数据类型，优先使用MPS支持的类型
 print(torch.__version__)  # 应输出2.0.0或更高版本
 
 
 # 其他配置保持不变...
-compile = False # use PyTorch 2.0 to compile the model to be faster
 # -----------------------------------------------------------------------------
 config_keys = [k for k,v in globals().items() if not k.startswith('_') and isinstance(v, (int, float, bool, str))]
 exec(open('configurator.py').read()) # overrides from command line or config file
@@ -218,6 +219,7 @@ def get_model_init_from(init_from) :
         model.load_state_dict(state_dict)
         iter_num = checkpoint['iter_num']
         best_val_loss = checkpoint['best_val_loss']
+
     elif init_from.startswith('gpt2'):
         print(f"Initializing from OpenAI GPT-2 weights: {init_from}")
         # initialize from OpenAI GPT-2 weights
@@ -271,13 +273,23 @@ def get_lr(it):
 
 
 
-def foreach_learn_stop(iter_num,local_iter_num):
+
+
+
+
+
+
+
+
+
+
+
+def foreach_learn_stop(iter_num,local_iter_num,optimizer):
     while True:
         # determine and set the learning rate for this iteration
         lr = get_lr(iter_num) if decay_lr else learning_rate
         for param_group in optimizer.param_groups:
             param_group['lr'] = lr
-
         # evaluate the loss on train/val sets and write checkpoints
         if iter_num % eval_interval == 0 and master_process:
             losses = estimate_loss()
@@ -352,20 +364,8 @@ def foreach_learn_stop(iter_num,local_iter_num):
             break
 
 if __name__ == '__main__':
-    model = get_model_init_from(init_from)
-    # wrap model into DDP container
-    # logging
-    if wandb_log and master_process:
-        import wandb
-        wandb.init(project=wandb_project, name=wandb_run_name, config=config)
-    # initialize a GradScaler. If enabled=False scaler is a no-op
-    scaler = torch.cuda.amp.GradScaler(enabled=(dtype == 'float16'))
-
-    # optimizer
-    optimizer = model.configure_optimizers(weight_decay, learning_rate, (beta1, beta2), device_type)
-    if init_from == 'resume':
-        optimizer.load_state_dict(checkpoint['optimizer'])
-    checkpoint = None # free up memory
+    ddp_set_muti(gradient_accumulation_steps)
+    device, dtype,device_type = torch_init()
     # init these up here, can override if init_from='resume' (i.e. from a checkpoint)
     iter_num = 0
     best_val_loss = 1e9
@@ -382,18 +382,41 @@ if __name__ == '__main__':
     # model init
     model_args = dict(n_layer=n_layer, n_head=n_head, n_embd=n_embd, block_size=block_size,
                       bias=bias, vocab_size=None, dropout=dropout) # start with model_args from command line
-        # training loop
+
+    model = get_model_init_from(init_from)
+
+    # initialize a GradScaler. If enabled=False scaler is a no-op
+    scaler = torch.cuda.amp.GradScaler(enabled=(dtype == 'float16'))
+    # optimizer
+# optimizer
+    optimizer = model.configure_optimizers(weight_decay, learning_rate, (beta1, beta2), device_type)
+    if (init_from == 'resume' and checkpoint is not None):
+        optimizer.load_state_dict(checkpoint['optimizer'])
+    checkpoint = None # free up memory
+
+    # compile the model
+    if compile:
+        print("compiling the model... (takes a ~minute)")
+        unoptimized_model = model
+        model = torch.compile(model) # requires PyTorch 2.0
+
+    # wrap model into DDP container
+    if ddp:
+        model = DDP(model, device_ids=[ddp_local_rank])
+
+    # foreach_learn_stop 参数初始化
+    if wandb_log and master_process:
+        import wandb
+        wandb.init(project=wandb_project, name=wandb_run_name, config=config)
+
+    # training loop
     X, Y = get_batch('train') # fetch the very first batch
     t0 = time.time()
     local_iter_num = 0 # number of iterations in the lifetime of this process
     raw_model = model.module if ddp else model # unwrap DDP container if needed
     running_mfu = -1.0
-    foreach_learn_stop(iter_num,local_iter_num)
+
+    foreach_learn_stop(iter_num,local_iter_num,optimizer)
+
     if ddp:
-        model = DDP(model, device_ids=[ddp_local_rank])
-        # compile the model
-    if compile:
-        print("compiling the model... (takes a ~minute)")
-        unoptimized_model = model
-        model = torch.compile(model) # requires PyTorch 2.0
-    destroy_process_group()
+            destroy_process_group()
