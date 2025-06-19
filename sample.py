@@ -2,7 +2,6 @@
 Sample from a trained model
 """
 import os
-import pdb
 import pickle
 from contextlib import nullcontext
 import torch
@@ -13,55 +12,23 @@ from model import GPTConfig, GPT
 init_from = 'resume' # either 'resume' (from an out_dir) or a gpt2 variant (e.g. 'gpt2-xl')
 out_dir = 'out' # ignored if init_from is not 'resume'
 start = "\n" # or "<|endoftext|>" or etc. Can also specify a file, use as: "FILE:prompt.txt"
-num_samples = 1 # number of samples to draw
-max_new_tokens = 1000 # number of tokens generated in each sample
+num_samples = 10 # number of samples to draw
+max_new_tokens = 500 # number of tokens generated in each sample
 temperature = 0.8 # 1.0 = no change, < 1.0 = less random, > 1.0 = more random, in predictions
-top_k =100 # retain only the top_k most likely tokens, clamp others to have 0 probability
+top_k = 200 # retain only the top_k most likely tokens, clamp others to have 0 probability
 seed = 1337
-device_type = 'mps'
-
-# 检测MPS是否可用并设置设备
-import pdb
-
-
-if torch.backends.mps.is_available():
-    device = 'mps'
-else:
-    device = 'cpu'  # 纯CPU模式，性能较差
-device = 'cpu'
-# 设置数据类型，优先使用MPS支持的类型
-if device == 'mps':
-    # M1/M2对bfloat16支持较好，float16可能有兼容性问题
-    dtype = 'bfloat16' if torch.backends.mps.is_bf16_supported() else 'float32'
-elif device == 'cuda':
-    dtype = 'bfloat16' if torch.cuda.is_available() and torch.cuda.is_bf16_supported() else 'float16'
-else:
-    dtype = 'float32'
-    use_autocast = False  # CPU上禁用自动混合精度
-compile = False  # use PyTorch 2.0 to compile the model to be faster
-exec(open('configurator.py').read())  # overrides from command line or config file
+device = 'cuda' # examples: 'cpu', 'cuda', 'cuda:0', 'cuda:1', etc.
+dtype = 'bfloat16' if torch.cuda.is_available() and torch.cuda.is_bf16_supported() else 'float16' # 'float32' or 'bfloat16' or 'float16'
+compile = False # use PyTorch 2.0 to compile the model to be faster
+exec(open('configurator.py').read()) # overrides from command line or config file
 # -----------------------------------------------------------------------------
 
 torch.manual_seed(seed)
-if device == 'cuda':
-    torch.cuda.manual_seed(seed)
-elif device == 'mps':
-    # MPS没有单独的随机数种子API，依赖CPU种子
-    pass
-
-# 优化设置，根据设备类型调整
-if device_type == 'cuda':
-    torch.backends.cuda.matmul.allow_tf32 = True  # allow tf32 on matmul
-    torch.backends.cudnn.allow_tf32 = True  # allow tf32 on cudnn
-elif device_type == 'mps':
-    # M1/M2的优化设置
-    torch.backends.mps.precision = 'highest'  # 设置最高精度
-    # 启用MPS调试模式（可选，用于排查问题）
-    # torch._C._mps_set_debug_mode(True)
-
-device_type = 'mps' if 'mps' in device else 'cuda' if 'cuda' in device else 'cpu'
+torch.cuda.manual_seed(seed)
+torch.backends.cuda.matmul.allow_tf32 = True # allow tf32 on matmul
+torch.backends.cudnn.allow_tf32 = True # allow tf32 on cudnn
+device_type = 'cuda' if 'cuda' in device else 'cpu' # for later use in torch.autocast
 ptdtype = {'float32': torch.float32, 'bfloat16': torch.bfloat16, 'float16': torch.float16}[dtype]
-
 ctx = nullcontext() if device_type == 'cpu' else torch.amp.autocast(device_type=device_type, dtype=ptdtype)
 
 # model
