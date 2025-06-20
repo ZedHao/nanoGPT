@@ -2,7 +2,7 @@
 # good for debugging and playing on macbooks and such
 # 训练配置与输出设置
 out_dir = 'out-shakespeare-char'  # 训练输出目录，保存模型检查点和日志
-eval_interval = 250  # 每训练250步进行一次验证，频繁验证有助于监控过拟合
+eval_interval = 200  # 每训练200步进行一次验证，频繁验证有助于监控过拟合
 eval_iters = 200  # 验证时使用的迭代次数，用于计算平均验证损失
 log_interval = 10  # 每10步打印一次训练日志，避免输出过于频繁
 # we expect to overfit on this small dataset, so only save when val improves
