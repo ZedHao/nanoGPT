@@ -65,10 +65,23 @@ def ddp_set_muti(gradient_accumulation_steps: int) -> (bool, int):
     tokens_per_iter = gradient_accumulation_steps * ddp_world_size * batch_size * block_size
     print(f"tokens per iteration will be: {tokens_per_iter:,}")
     return master_process, seed_offset
-# 这段代码是深度学习训练脚本的设备配置与环境初始化部分，
-# 主要负责：创建输出目录、设置随机种子、检测计算设备、配置数据类型和精度模式，
-# 以及准备数据加载路径。以下是详细解析：
+
 def torch_init()-> (str, str,str):
+    '''
+    # 这段代码是深度学习训练脚本的设备配置与环境初始化部分，
+    # 主要负责：创建输出目录、设置随机种子、检测计算设备、配置数据类型和精度模式，
+    # 以及准备数据加载路径。以下是详细解析：
+    1.为什么需要随机种子？
+        模型参数的初始值（权重矩阵随机初始化）；
+        数据加载时的随机打乱（get_batch 中用 torch.randint 随机采样数据）；
+        Dropout 层的随机失活（训练时随机丢弃部分神经元）；
+        优化器中的随机梯度更新（如 Adam 中的动量随机估计）。
+    2. 为什么要 “固定” 随机种子？
+        固定随机种子的本质是让这些随机操作的结果可预测，从而带来两个关键好处：
+        实验可复现：同一代码、同一参数，无论何时、何地运行，都能得到完全相同的训练过程和结果（例如，损失曲线、模型精度完全一致）。这对调试代码、对比不同实验（如调整学习率、模型结构）至关重要 —— 如果结果不可复现，就无法判断性能变化是来自参数调整还是随机因素。
+        分布式训练一致性：在分布式训练（DDP）中，多个进程需要处理不同的数据分片，但初始化逻辑（如模型参数）必须完全同步。代码中 seed_offset = ddp_rank 确保每个进程的种子不同但固定（1337 + 0、1337 + 1...），既避免了不同进程的数据采样重复，又保证了整体随机性的可控性。
+    :return:
+    '''
     if master_process:
         os.makedirs(out_dir, exist_ok=True)
     torch.manual_seed(1337 + seed_offset) # 功能：设置 PyTorch 的随机种子，保证模型初始化、数据洗牌等操作的可复现性。
@@ -100,6 +113,7 @@ def get_batch(split, device_type):
     这段代码是深度学习模型（尤其是语言模型）的数据加载核心逻辑，主要实现了基于内存映射的高效数据读取和批量数据生成。以下是详细解析：
         内存映射：np.memmap将二进制文件直接映射到内存，无需一次性加载全部数据到 RAM，适合处理 GB 级大规模数据集（如语言模型训练数据）。
         避免内存泄漏：每次迭代重新创建memmap对象，解决了长期持有内存映射可能导致的资源释放问题（参考注释中的 Stack Overflow 解决方案）。
+
     :param split:
     :param device_type:
     :return:
@@ -355,6 +369,12 @@ if __name__ == '__main__':
     master_process, seed_offset = ddp_set_muti(gradient_accumulation_steps)
     print("---------参数初始化结束--------" ,  master_process, seed_offset)
     # 上下文管理器
+    '''
+    nullcontext()：一个空的上下文管理器，相当于 “不做任何特殊处理”（默认使用单精度训练）。
+    注释部分是完整逻辑：如果启用混合精度（use_autocast=True），则使用 torch.amp.autocast 创建上下文，
+    自动在计算中混合 float16/bfloat16（低精度）和 float32（高精度），加速训练并减少显存占用；否则使用空上下文（纯 float32 训练）。
+    这里当前代码强制使用了 nullcontext()（可能是为了调试或兼容某些设备），实际使用时可根据 use_autocast 动态切换。
+    '''
     ctx = nullcontext() #if not use_autocast else torch.amp.autocast( device_type=device, dtype={'float32': torch.float32, 'bfloat16': torch.bfloat16, 'float16': torch.float16}[dtype])
     # poor man's data loader
     data_dir = os.path.join('data', dataset)
