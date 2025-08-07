@@ -2,6 +2,7 @@ freeze:
 pip freeze > requirements.txt
 install:
 pip install -r requirements.txt
+# Python 3.8.10
 
 # nanoGPT
 

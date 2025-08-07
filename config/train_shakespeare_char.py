@@ -15,6 +15,8 @@ wandb_project = 'shakespeare-char'  # WandB项目名称
 wandb_run_name = 'mini-gpt'  # 当前运行的名称
 
 dataset = 'shakespeare_char'  # 使用莎士比亚文本的字符级数据集
+#dataset = 'openwebtext'  # 使用莎士比亚文本的字符级数据集
+
 gradient_accumulation_steps = 4  # 梯度累积步数，等效于增大batch_size
 batch_size = 8  # 每次训练的样本数（实际批量大小 = batch_size * gradient_accumulation_steps）
 block_size = 128  # 上下文长度，模型一次处理的最大字符数（用于自回归）

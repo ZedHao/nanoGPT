@@ -17,6 +17,7 @@ $ torchrun --nproc_per_node=8 --nnodes=2 --node_rank=1 --master_addr=123.456.123
 """
 
 import os
+import pdb
 import time
 import math
 import pickle
@@ -29,6 +30,19 @@ from torch.distributed import init_process_group, destroy_process_group
 
 from model import GPTConfig, GPT
 def ddp_set_muti(gradient_accumulation_steps: int) -> (bool, int):
+    '''
+    这个函数 ddp_set_muti 是用于配置分布式训练（DDP，Distributed Data Parallel）环境的工具函数，
+    主要作用是根据是否启用分布式训练，初始化进程组、设置设备、调整梯度累积参数，并返回主进程标识和种子偏移量。
+    核心功能
+    在大规模模型训练中，单卡算力可能不足，因此需要用多卡（或多进程）分布式训练（DDP）。这个函数的作用就是：
+
+    判断当前是否处于分布式训练环境；
+    若启用 DDP，初始化分布式进程组、配置设备和进程参数；
+    调整梯度累积步数以适配分布式场景；
+    计算每轮迭代处理的总 token 数，方便监控训练效率。
+    :param gradient_accumulation_steps:
+    :return:
+    '''
     ddp = int(os.environ.get('RANK', -1)) != -1 # is this a ddp run?
     if ddp:
         init_process_group(backend=backend)
@@ -163,13 +177,6 @@ def get_model_init_from(init_from) :
         model_args['block_size'] = block_size # so that the checkpoint will have the right value
     model.to(device)
     return model,checkpoint
-
-
-
-
-
-
-
 # helps estimate an arbitrarily accurate loss over either split using many batches
 @torch.no_grad()
 def estimate_loss(device_type):
@@ -290,6 +297,7 @@ if __name__ == '__main__':
     # -----------------------------------------------------------------------------
     # default config values designed to train a gpt2 (124M) on OpenWebText
     # I/O
+    print("---------参数初始化开始--------")
     out_dir = 'out'  # 模型训练输出目录，用于保存检查点、日志等文件
     eval_interval = 500  # 每训练2000步进行一次验证，监控模型在验证集上的性能
     log_interval = 1  # 每1步打印一次训练日志，实时输出训练进度和损失值
@@ -337,26 +345,15 @@ if __name__ == '__main__':
     # 其他配置保持不变...
     # -----------------------------------------------------------------------------
     config_keys = [k for k,v in globals().items() if not k.startswith('_') and isinstance(v, (int, float, bool, str))]
+    print("---------参数加载和覆盖configurator.py--------")
     exec(open('configurator.py').read()) # overrides from command line or config file
     config = {k: globals()[k] for k in config_keys} # will be useful for logging
-    # -----------------------------------------------------------------------------
-
-    # 这段代码是 PyTorch 中实现 ** 分布式数据并行训练（Distributed Data Parallel, DDP）** 的初始化逻辑，主要功能是配置多 GPU / 多节点训练环境
-    # 这段代码通过环境变量检测是否启动分布式训练，并自动配置：
-    #
-    # 进程间通信与 GPU 分配
-    # 主进程任务调度
-    # 梯度累积参数调整
-    # 训练吞吐量计算
-    # ddp是一个布尔标志，决定是否启用分布式训练模式
-    # 当ddp=True时，代码会初始化分布式环境并配置多 GPU 训练参数
-    # 当ddp=False时，默认使用单 GPU 训练
     master_process = False
     seed_offset = 0
     ddp = False
     ddp_local_rank = 0
     master_process, seed_offset = ddp_set_muti(gradient_accumulation_steps)
-    print("---------ddp_set_muti--------" ,  master_process, seed_offset)
+    print("---------参数初始化结束--------" ,  master_process, seed_offset)
     # 上下文管理器
     ctx = nullcontext() #if not use_autocast else torch.amp.autocast( device_type=device, dtype={'float32': torch.float32, 'bfloat16': torch.bfloat16, 'float16': torch.float16}[dtype])
     # poor man's data loader
@@ -369,6 +366,7 @@ if __name__ == '__main__':
 
     # attempt to derive vocab_size from the dataset
     meta_path = os.path.join(data_dir, 'meta.pkl')
+
     meta_vocab_size = None
     if os.path.exists(meta_path):
         with open(meta_path, 'rb') as f:

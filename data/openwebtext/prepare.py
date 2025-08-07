@@ -10,7 +10,7 @@ from datasets import load_dataset # huggingface datasets
 # number of workers in .map() call
 # good number to use is ~order number of cpu cores // 2
 num_proc = 8
-
+''''''
 # number of workers in load_dataset() call
 # best number might be different from num_proc above as it also depends on NW speed.
 # it is better than 1 usually though
@@ -20,6 +20,13 @@ enc = tiktoken.get_encoding("gpt2")
 
 if __name__ == '__main__':
     # takes 54GB in huggingface .cache dir, about 8M documents (8,013,769)
+    '''
+    OpenWebText 是一个包含大量网页文本的开源数据集（类似 GPT 训练数据的子集），原始数据是字符串格式，无法直接被模型使用。这段代码的作用是将其转换为模型可直接处理的整数 token 序列，并以二进制文件存储，最终产出：
+
+    train.bin：训练集的 token 序列（约 17GB）
+    val.bin：验证集的 token 序列（约 8.5MB）
+     load_dataset 是一行从 Hugging Face 的 datasets 库中导入 load_dataset 函数的代码，用于加载各种公开的数据集（尤其是自然语言处理相关数据集）。openwebtext
+     '''
     dataset = load_dataset("openwebtext", num_proc=num_proc_load_dataset)
 
     # owt by default only contains the 'train' split, so create a test split
