@@ -261,6 +261,14 @@ class GPT(nn.Module):
         return model
 
     def configure_optimizers(self, weight_decay, learning_rate, betas, device_type):
+        '''
+        这是模型类中的一个方法，用于创建适合 GPT 等 Transformer 模型的优化器，核心逻辑是区分参数类型并应用不同的权重衰减，同时优化训练速度。
+        :param weight_decay:
+        :param learning_rate:
+        :param betas:
+        :param device_type:
+        :return:
+        '''
         # start with all of the candidate parameters
         param_dict = {pn: p for pn, p in self.named_parameters()}
         # filter out those that do not require grad
